@@ -20,21 +20,15 @@ class Warehouse:
                 return product
         return None
 
-class Order:
-    def __init__(self, customer, product_name, quantity):
-        self.customer = customer
-        self.product_name = product_name
-        self.quantity = quantity
-
 class OnlineShop:
     def __init__(self):
         self.warehouse = Warehouse()
 
-    def buy_product(self, order):
-        product = self.warehouse.get_product(order.product_name)
+    def buy_product(self, customer, product_name, quantity):
+        product = self.warehouse.get_product(product_name)
         if product is None:
             return False
-        if product.quantity < order.quantity:
+        if product.quantity < quantity:
             return False
-        product.quantity -= order.quantity
+        product.quantity -= quantity
         return True
