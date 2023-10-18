@@ -27,7 +27,7 @@ import os
 import requests
 
 # Load the Webex token from the file
-WEBEX_SECRET_FILE = "/var/tmp/webex-secret"
+WEBEX_SECRET_FILE = "/etc/webex-secret"
 try:
     with open(WEBEX_SECRET_FILE, 'r') as f:
         webex_token = f.read().strip()
@@ -35,8 +35,8 @@ except FileNotFoundError:
     print("Webex secret file not found. Terminating.")
     exit(1)
 
-# Initialize the list to store checksums
-checksums = set()
+# Contains the <name><namespace><kind> ad key and the <severity> as a value
+states = {}
 
 # Webex room ID
 WEBEX_ROOM_ID = os.getenv("WEBEX_ROOM_ID")
@@ -48,35 +48,47 @@ if WEBEX_ROOM_ID is None:
 # Create a logger
 logging.basicConfig(level=logging.INFO)
 
+
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
-    def _calculate_checksum(self, event):
+
+    def get_unique_id(self, event):
         fields_to_hash = [
-            event['involvedObject']['uid'],
-            event['metadata']['toolkit.fluxcd.io/revision'],
-            event['severity'],
-            event['message'],
-            event['reason'],
+            event['involvedObject']['kind'],
+            event['involvedObject']['name'],
+            event['involvedObject']['namespace']
         ]
         event_data = ''.join(fields_to_hash)
-        checksum = hashlib.sha256(event_data.encode()).hexdigest()
-        return checksum
+        unique_key = hashlib.sha256(event_data.encode()).hexdigest()
+        return unique_key
 
-    def _send_to_webex(self, event, checksum):
-        if checksum not in checksums:
-            checksums.add(checksum)
-            payload = {
-                "roomId": WEBEX_ROOM_ID,
-                "text": json.dumps(event, indent=4)
-            }
-            headers = {
-                "Authorization": f"Bearer {webex_token}",
-                "Content-Type": "application/json"
-            }
-            response = requests.post("https://webexapis.com/v1/messages", headers=headers, json=payload)
-            if response.status_code == 200:
-                logging.info(f"Event sent to Webex: {checksum}")
-            else:
-                logging.error(f"Failed to send event to Webex: {checksum}")
+    def create_markdown(self, event):
+        emoji = "\u2705"
+        if event['severity'] == "error":
+            emoji = "\u274C"
+
+        markdown = f"{emoji} **{event['involvedObject']['kind'].lower()}/{event['involvedObject']['name']}.{event['involvedObject']['namespace']}**\n"
+        markdown += f"{event['message']}\n"
+
+        if event['metadata']:
+            for k, v in event['metadata'].items():
+                markdown += f">**{k}**: {v}\n"
+
+        return markdown
+
+    def _send_to_webex(self, event, object_id):
+        payload = {
+            "roomId": WEBEX_ROOM_ID,
+            "markdown": self.create_markdown(event)
+        }
+        headers = {
+            "Authorization": f"Bearer {webex_token}",
+            "Content-Type": "application/json"
+        }
+        response = requests.post("https://webexapis.com/v1/messages", headers=headers, json=payload)
+        if response.status_code == 200:
+            logging.info(f"Event sent to Webex: {object_id}")
+        else:
+            logging.error(f"Failed to send event to Webex: {object_id}")
 
     def do_POST(self):
         content_length = int(self.headers['Content-Length'])
@@ -86,19 +98,22 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         # 1. Log the event
         logging.info(f"Received event: {event}")
 
-        # 2. Calculate the checksum
-        checksum = self._calculate_checksum(event)
-        logging.info(f"Calculated checksum: {checksum}")
+        # 2. Get the id of the involved object
+        unique_id = self.get_unique_id(event)
 
-        # 3. Check if checksum is in the list
-        if checksum in checksums:
-            logging.info(f"Checksum is already in the list: {checksum}")
+        logging.info(f"Event is for object: {unique_id}")
+
+        # 3. Get the current state of the object
+        current_state = states.get(unique_id)
+
+        # 4. Check the current state of the object and sent it to Webex if it has changed
+        if current_state is None or current_state != event['severity']:
+            logging.info(f"State changed from {current_state} to {event['severity']}")
+            self._send_to_webex(event, unique_id)
+            states[unique_id] = event['severity']
         else:
-            # 4. Store checksum in the list
-            self._send_to_webex(event, checksum)
-            # 5. Log whether the checksum is already in the list
-            logging.info(f"Checksum added to the list: {checksum}")
-            
+            logging.info(f"State unchanged: {current_state} for object {unique_id}")
+
         self.send_response(200)
         self.end_headers()
 

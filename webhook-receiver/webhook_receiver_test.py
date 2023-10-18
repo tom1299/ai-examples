@@ -15,7 +15,10 @@ class TestWebhookReceiver(unittest.TestCase):
         # Define a sample event payload
         event = {
             "involvedObject": {
-                "uid": "123",
+                "kind": "HelmRelease",
+                "name": "sample-app",
+                "namespace": "default",
+                "uid": "12345",
             },
             "metadata": {
                 "toolkit.fluxcd.io/revision": "v1",
