@@ -11,7 +11,7 @@ Task: Implement the following specification:
 #   - message
 #   - reason
 # 3. The checksum is logged
-# 4. The checksum is stored as a string in a list limited to 1000 if it is not yet contained in the list
+# 4. The checksum is stored as a string in a transient list limited to 1000 if it is not yet contained in the list
 # 5. Log whether the checksum is already in the list
 # 6. If the checksum is not yet stored in the list, the the event is sent to a webex channel identified by the WEBEX_ROOM_ID environment variable
 # Additional information:
@@ -26,106 +26,80 @@ import logging
 import os
 import requests
 
-# Define the path to store the checksums
-CHECKSUMS_FILE = "checksums.txt"
+# Load the Webex token from the file
+WEBEX_SECRET_FILE = "/etc/webex-secret"
+try:
+    with open(WEBEX_SECRET_FILE, 'r') as f:
+        webex_token = f.read().strip()
+except FileNotFoundError:
+    print("Webex secret file not found. Terminating.")
+    exit(1)
 
-# Configure the logging format
-logging.basicConfig(level=logging.INFO, format='{"time_stamp": "%(asctime)s", "log_level": "%(levelname)s", "message": "%(message)s"}')
+# Initialize the list to store checksums
+checksums = set()
 
-# Function to read the Webex secret from a file
-def get_webex_secret():
-    try:
-        with open("/etc/webex-secret", "r") as secret_file:
-            return secret_file.read().strip()
-    except FileNotFoundError:
-        logging.error("Webex secret file not found. Program terminated.")
-        exit(1)
+# Webex room ID
+WEBEX_ROOM_ID = os.getenv("WEBEX_ROOM_ID")
 
-# Function to send an event to Webex
-def send_event_to_webex(event, webex_token, webex_room_id):
-    headers = {
-        'Authorization': f'Bearer {webex_token}',
-        'Content-Type': 'application/json'
-    }
-    data = {
-        'roomId': webex_room_id,
-        'text': json.dumps(event, indent=4)
-    }
+# Create a logger
+logging.basicConfig(level=logging.INFO)
 
-    response = requests.post('https://webexapis.com/v1/messages', headers=headers, json=data)
-
-    if response.status_code == 200:
-        logging.info("Event sent to Webex successfully.")
-    else:
-        logging.error(f"Failed to send event to Webex. Status Code: {response.status_code}")
-        logging.error(response.text)
-
-# Function to calculate the checksum
-def calculate_checksum(event):
-    fields = [
-        event.get('involvedObject', {}).get('uid', ''),
-        event.get('metadata', {}).get('toolkit.fluxcd.io/revision', ''),
-        event.get('severity', ''),
-        event.get('message', ''),
-        event.get('reason', '')
-    ]
-
-    checksum = hashlib.sha256(json.dumps(fields).encode()).hexdigest()
-    return checksum
-
-# Function to load existing checksums from file
-def load_checksums():
-    checksums = set()
-    if os.path.exists(CHECKSUMS_FILE):
-        with open(CHECKSUMS_FILE, "r") as file:
-            for line in file:
-                checksums.add(line.strip())
-    return checksums
-
-# Function to save the checksums to file
-def save_checksums(checksums):
-    with open(CHECKSUMS_FILE, "w") as file:
-        for checksum in checksums:
-            file.write(checksum + "\n")
-
-# Main request handler
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
+    def _calculate_checksum(self, event):
+        fields_to_hash = [
+            event['involvedObject']['uid'],
+            event['metadata']['toolkit.fluxcd.io/revision'],
+            event['severity'],
+            event['message'],
+            event['reason'],
+        ]
+        event_data = ''.join(fields_to_hash)
+        checksum = hashlib.sha256(event_data.encode()).hexdigest()
+        return checksum
+
+    def _send_to_webex(self, event, checksum):
+        if checksum not in checksums:
+            checksums.add(checksum)
+            payload = {
+                "roomId": WEBEX_ROOM_ID,
+                "text": json.dumps(event, indent=4)
+            }
+            headers = {
+                "Authorization": f"Bearer {webex_token}",
+                "Content-Type": "application/json"
+            }
+            response = requests.post("https://webexapis.com/v1/messages", headers=headers, json=payload)
+            if response.status_code == 200:
+                logging.info(f"Event sent to Webex: {checksum}")
+            else:
+                logging.error(f"Failed to send event to Webex: {checksum}")
+
     def do_POST(self):
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         event = json.loads(post_data)
+        
+        # 1. Log the event
+        logging.info(f"Received event: {event}")
 
-        logging.info("Received event:")
-        logging.info(json.dumps(event, indent=4))
+        # 2. Calculate the checksum
+        checksum = self._calculate_checksum(event)
+        logging.info(f"Calculated checksum: {checksum}")
 
-        checksum = calculate_checksum(event)
-        logging.info("Checksum: " + checksum)
-
-        checksums = load_checksums()
+        # 3. Check if checksum is in the list
         if checksum in checksums:
-            logging.info("Checksum already in the list.")
+            logging.info(f"Checksum is already in the list: {checksum}")
         else:
-            logging.info("Checksum not in the list. Storing it.")
-            checksums.add(checksum)
-            if len(checksums) > 1000:
-                # Remove the oldest checksums if the list exceeds 1000 items
-                checksums = list(checksums)[-1000:]
-            save_checksums(checksums)
-            webex_token = get_webex_secret()
-            webex_room_id = os.environ.get("WEBEX_ROOM_ID")
-            send_event_to_webex(event, webex_token, webex_room_id)
+            # 4. Store checksum in the list
+            self._send_to_webex(event, checksum)
+            # 5. Log whether the checksum is already in the list
+            logging.info(f"Checksum added to the list: {checksum}")
 
-        self.send_response(200)
-        self.end_headers()
+def run_server():
+    server_address = ('', 8000)
+    httpd = http.server.HTTPServer(server_address, WebhookHandler)
+    logging.info("Webhook receiver is running on port 8000.")
+    httpd.serve_forever()
 
 if __name__ == '__main__':
-    # Ensure the directory exists for the checksums file
-    os.makedirs(os.path.dirname(CHECKSUMS_FILE), exist_ok=True)
-
-    try:
-        server_address = ('', 8080)
-        httpd = http.server.HTTPServer(server_address, WebhookHandler)
-        logging.info("Webhook receiver is running on port 8080.")
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        logging.info("Webhook receiver terminated.")
+    run_server()
