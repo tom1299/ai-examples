@@ -1,5 +1,5 @@
-You are an expert python programmer.
-Task: Implement the following specification:
+# You are an expert python programmer.
+# Task: Implement the following specification:
 # Context: A web hook receiver based on the http.server module
 # that will receive a POST request from a webhook containing
 # events in flux notification event format. The process is as follows:
@@ -15,7 +15,7 @@ Task: Implement the following specification:
 # 5. Log whether the checksum is already in the list
 # 6. If the checksum is not yet stored in the list, the the event is sent to a webex channel identified by the WEBEX_ROOM_ID environment variable
 # Additional information:
-# - The Token used for authenticating against webex is read from the file "/etc/webex-secret once at the start of the program. If the secret is not found, the program will terminate with
+# - The Token used for authenticating against webex is read from the file "/var/tmp/webex-secret once at the start of the program. If the secret is not found, the program will terminate with
 # an appropriate error message
 # - Logging is done using pythons logging library in the following json format {<time_stamp>, <log_level>, <message>}
 
@@ -27,7 +27,7 @@ import os
 import requests
 
 # Load the Webex token from the file
-WEBEX_SECRET_FILE = "/etc/webex-secret"
+WEBEX_SECRET_FILE = "/var/tmp/webex-secret"
 try:
     with open(WEBEX_SECRET_FILE, 'r') as f:
         webex_token = f.read().strip()
@@ -40,6 +40,10 @@ checksums = set()
 
 # Webex room ID
 WEBEX_ROOM_ID = os.getenv("WEBEX_ROOM_ID")
+if WEBEX_ROOM_ID is None:
+    print("WEBEX_ROOM_ID environment variable is not set. Terminating.")
+    exit(1)
+    
 
 # Create a logger
 logging.basicConfig(level=logging.INFO)
@@ -94,6 +98,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             self._send_to_webex(event, checksum)
             # 5. Log whether the checksum is already in the list
             logging.info(f"Checksum added to the list: {checksum}")
+            
+        self.send_response(200)
+        self.end_headers()
 
 def run_server():
     server_address = ('', 8000)
