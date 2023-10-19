@@ -1,127 +1,121 @@
-# You are an expert python programmer.
-# Task: Implement the following specification:
-# Context: A web hook receiver based on the http.server module
-# that will receive a POST request from a webhook containing
-# events in flux notification event format. The process is as follows:
-# 1. The event is logged
-# 2. A checksum of the event is calculated based on the following fields:
-#   - involvedObject.uid
-#   - metadata.toolkit.fluxcd.io/revision
-#   - severity
-#   - message
-#   - reason
-# 3. The checksum is logged
-# 4. The checksum is stored as a string in a transient list limited to 1000 if it is not yet contained in the list
-# 5. Log whether the checksum is already in the list
-# 6. If the checksum is not yet stored in the list, the the event is sent to a webex channel identified by the WEBEX_ROOM_ID environment variable
-# Additional information:
-# - The Token used for authenticating against webex is read from the file "/var/tmp/webex-secret once at the start of the program. If the secret is not found, the program will terminate with
-# an appropriate error message
-# - Logging is done using pythons logging library in the following json format {<time_stamp>, <log_level>, <message>}
-
+import hashlib
 import http.server
 import json
-import hashlib
 import logging
 import os
+import sys
+
 import requests
 
-# Load the Webex token from the file
+
+class JsonFormatter(logging.Formatter):
+
+    def format(self, record):
+        if isinstance(record.msg, dict):
+            message = record.msg
+        else:
+            message = record.getMessage()
+        log_record = {'timestamp': self.formatTime(record), 'level': record.levelname, 'message': message, }
+        return json.dumps(log_record)
+
+
+logger = logging.getLogger()
+handler = logging.StreamHandler()
+formatter = JsonFormatter()
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
+
 WEBEX_SECRET_FILE = "/etc/webex-secret"
+
 try:
-    with open(WEBEX_SECRET_FILE, 'r') as f:
+    with open(WEBEX_SECRET_FILE, 'r', encoding="utf-8") as f:
         webex_token = f.read().strip()
 except FileNotFoundError:
-    print("Webex secret file not found. Terminating.")
-    exit(1)
+    logger.warning("Webex secret file %s not found. "
+                   "Trying to read from environment variable WEBEX_TOKEN", WEBEX_SECRET_FILE)
+    webex_token = os.getenv("WEBEX_TOKEN")
+    if webex_token is None:
+        logger.error("Neither secret file %s nor environment variable WEBEX_TOKEN found. "
+                     "Can not authenticate against Webex", WEBEX_SECRET_FILE)
+        sys.exit(1)
 
-# Contains the <name><namespace><kind> ad key and the <severity> as a value
-states = {}
-
-# Webex room ID
 WEBEX_ROOM_ID = os.getenv("WEBEX_ROOM_ID")
 if WEBEX_ROOM_ID is None:
-    print("WEBEX_ROOM_ID environment variable is not set. Terminating.")
-    exit(1)
-    
-
-# Create a logger
-logging.basicConfig(level=logging.INFO)
+    print("WEBEX_ROOM_ID environment variable is not set")
+    sys.exit(1)
 
 
 class WebhookHandler(http.server.BaseHTTPRequestHandler):
 
-    def get_unique_id(self, event):
-        fields_to_hash = [
-            event['involvedObject']['kind'],
-            event['involvedObject']['name'],
-            event['involvedObject']['namespace']
-        ]
+    __states = {}
+
+    # noinspection PyMethodMayBeStatic
+    def __get_unique_id(self, event):
+        fields_to_hash = [event['involvedObject']['kind'], event['involvedObject']['name'],
+                          event['involvedObject']['namespace']]
         event_data = ''.join(fields_to_hash)
         unique_key = hashlib.sha256(event_data.encode()).hexdigest()
         return unique_key
 
-    def create_markdown(self, event):
+    # noinspection PyMethodMayBeStatic
+    def __create_markdown(self, event):
         emoji = "\u2705"
         if event['severity'] == "error":
             emoji = "\u274C"
 
-        markdown = f"{emoji} **{event['involvedObject']['kind'].lower()}/{event['involvedObject']['name']}.{event['involvedObject']['namespace']}**\n"
+        markdown = (f"{emoji} **{event['involvedObject']['kind'].lower()}/{event['involvedObject']['name']}"
+                    f".{event['involvedObject']['namespace']}**\n")
         markdown += f"{event['message']}\n"
 
         if event['metadata']:
-            for k, v in event['metadata'].items():
-                markdown += f">**{k}**: {v}\n"
+            for key, value in event['metadata'].items():
+                markdown += f">**{key}**: {value}\n"
 
         return markdown
 
-    def _send_to_webex(self, event, object_id):
-        payload = {
-            "roomId": WEBEX_ROOM_ID,
-            "markdown": self.create_markdown(event)
-        }
-        headers = {
-            "Authorization": f"Bearer {webex_token}",
-            "Content-Type": "application/json"
-        }
-        response = requests.post("https://webexapis.com/v1/messages", headers=headers, json=payload)
+    def __send_to_webex(self, event, object_id):
+        payload = {"roomId": WEBEX_ROOM_ID, "markdown": self.__create_markdown(event)}
+        headers = {"Authorization": f"Bearer {webex_token}", "Content-Type": "application/json"}
+        response = requests.post("https://webexapis.com/v1/messages", headers=headers, json=payload, timeout=5)
         if response.status_code == 200:
-            logging.info(f"Event sent to Webex: {object_id}")
+            logging.info("Event sent to Webex: %s", object_id)
         else:
-            logging.error(f"Failed to send event to Webex: {object_id}")
+            logging.error("Failed to send event to Webex: %s", object_id)
 
+    # noinspection PyPep8Naming, invalid-name
     def do_POST(self):
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         event = json.loads(post_data)
-        
-        # 1. Log the event
-        logging.info(f"Received event: {event}")
 
-        # 2. Get the id of the involved object
-        unique_id = self.get_unique_id(event)
+        logging.info("Received event: %s", event)
 
-        logging.info(f"Event is for object: {unique_id}")
+        unique_id = self.__get_unique_id(event)
 
-        # 3. Get the current state of the object
-        current_state = states.get(unique_id)
+        logging.info("Event is for object: %s", unique_id)
 
-        # 4. Check the current state of the object and sent it to Webex if it has changed
+        current_state = self.__states.get(unique_id)
+
         if current_state is None or current_state != event['severity']:
-            logging.info(f"State changed from {current_state} to {event['severity']}")
-            self._send_to_webex(event, unique_id)
-            states[unique_id] = event['severity']
+            logging.info("State changed from %s to %s", current_state, event['severity'])
+            self.__send_to_webex(event, unique_id)
+            self.__states[unique_id] = event['severity']
         else:
-            logging.info(f"State unchanged: {current_state} for object {unique_id}")
+            logging.info("State unchanged: %s for object %s", current_state, unique_id)
 
         self.send_response(200)
         self.end_headers()
 
+
 def run_server():
     server_address = ('', 8000)
     httpd = http.server.HTTPServer(server_address, WebhookHandler)
-    logging.info("Webhook receiver is running on port 8000.")
+    logging.info("Webhook receiver is running on port 8000")
     httpd.serve_forever()
+
 
 if __name__ == '__main__':
     run_server()
