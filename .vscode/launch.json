@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Calculator Add",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/calculator/cmd/main.go",
+      "args": [
+        "add",
+        "${input:num1}",
+        "${input:num2}"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "num1",
+      "type": "promptString",
+      "description": "Enter the first number",
+      "default": "2"
+    },
+    {
+      "id": "num2",
+      "type": "promptString",
+      "description": "Enter the second number",
+      "default": "3"
+    }
+  ]
+}
