@@ -6,6 +6,7 @@ WORKDIR /app
 
 # Copy go mod and sum files
 COPY go.mod ./
+COPY go.sum ./
 
 # Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
 RUN go mod download
@@ -14,22 +15,22 @@ RUN go mod download
 COPY . .
 
 # Build the Go app
-RUN go build -o calculator ./cmd/main.go
+RUN go build -o calculator-app ./main.go
 
 # Start a new stage from scratch
 FROM alpine:latest
 
-# Add a non-root user
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# Add a non-root user with GID > 10000
+RUN addgroup -g 10001 calc-group && adduser -D -u 10001 -G calc-group -D calc-user
 
 # Copy the Pre-built binary file from the previous stage
-COPY --from=builder /app/calculator /usr/local/bin/calculator
+COPY --from=builder /app/calculator-app /usr/local/bin/calculator
 
 # Change ownership and permissions
-RUN chown -R appuser:appgroup /usr/local/bin/calculator
+RUN chown -R calc-user:calc-group /usr/local/bin/calculator && chmod +x /usr/local/bin/calculator
 
 # Switch to the non-root user
-USER appuser
+USER calc-user
 
 # Command to run the executable
 ENTRYPOINT ["calculator"]
